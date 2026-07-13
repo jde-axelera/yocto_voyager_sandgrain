@@ -43,28 +43,28 @@ RK3588 (Linux host)
 
 The STM32 acts as a **transparent SPI bridge**: it receives a command over the USB serial port, performs the SPI transaction with the SGT1001, and sends the result back over USB serial.
 
-### The AT command protocol
+### The serial bridge protocol
 
-The STM32 firmware uses a simple ASCII-based command protocol (similar to the classic Hayes AT modem commands):
+The STM32 firmware uses a simple raw ASCII hex protocol:
 
 **Sending a frame:**
 ```
-AT+SPI=<MOSI bytes as hex string>\r\n
+<MOSI bytes as hex string>\r\n
 ```
 
 **Receiving the response:**
 ```
-<00 status byte><MISO bytes as hex string>\r
+<MISO bytes as hex string>\r
 ```
 
 Example — sending a 4-byte Mode 1 header followed by 33 zero bytes (37 bytes total) to read the Token ID:
 
 ```
-→  AT+SPI=01000000000000000000000000000000000000000000000000000000000000000000000000\r\n
+→  01000000000000000000000000000000000000000000000000000000000000000000000000\r\n
 ←  000000000036e32c31201ffc18d0f042e348a983869bee5ae94fcb396c000000000000000000\r
 ```
 
-The first two hex characters of the response (`00`) are a status byte (0x00 = OK). The remaining 74 hex characters (37 bytes) are the raw MISO data clocked back from the SGT1001.
+The response is the raw MISO data (37 bytes = 74 hex chars) clocked back from the SGT1001. There is no status byte prefix.
 
 ---
 
@@ -214,37 +214,51 @@ python3 sgt1001_comm.py --iface serial auth deadbeef01020304...
 
 ## Expected output and what it means
 
+The following is real output from a provisioned chip on the Axelera antelao board:
+
 ```
 ============================================================
 SGT1001 probe — running ID, BIST, and one auth
 ============================================================
-Mode 1  Token ID (TID) : e32c31201ffc18d0f042e348a983869bee5ae94fcb396c000000000000000000
+Mode 1  Token ID (TID) : 80000000000000000000000000000024d0f042e348a983869bee5ae94fcb396c
 ```
 
-This is the chip's globally unique 256-bit identity, read directly from silicon. The first 22 bytes are unique to this chip; the trailing zeros are unused bit fields padded to 256 bits.
+This is the chip's globally unique 256-bit identity, read directly from silicon.
 
 ```
-Mode 255  BIST result : NOT_PROVISIONED (HMAC key not yet loaded)
-          TID         : e32c31201ffc18d0f042e348a983869bee5ae94fcb396c000000000000000000
-          BRW         : 00000000000000000000000000000000 (zeros = no HMAC key)
-          BEK         : 00000000000000000000000000000000
+Mode 255  BIST result : PASS ✓
+          TID         : 80000000000000000000000000000024d0f042e348a983869bee5ae94fcb396c
+          BRW         : 99fe6abb007804ef325d59465b1300fb
+          BEK         : f37d07e62e5c8281af251d6ec5b625a8
 ```
 
-The chip's HMAC secret key has not yet been loaded via the CyberRock-Cloud platform, so the authentication engine outputs zeros. This is expected on an unprovisioned chip. The TID is still correct — identity reading does not require provisioning.
+BIST PASS confirms the chip's internal HMAC engine is functioning correctly and the chip is provisioned with a secret key.
 
 ```
-Mode 3  TID      : e32c31201ffc18d0f042e348a983869bee5ae94fcb396c000000000000000000
-        CW sent  : 8363084e776fe38dad84115b6db39504...  (random 32 bytes)
-        CW echo  : 0000...  ← zeros: chip not provisioned with HMAC key
-        RW (HMAC): 0000...
+Mode 3  TID      : 80000000000000000000000000000024d0f042e348a983869bee5ae94fcb396c
+        CW sent  : 23b601596973c23345203ce5de62627dd9c8300d2b8d0dd62638f7ddf7247eb8
+        CW echo  : 23b601596973c23345203ce5de62627dd9c8300d2b8d0dd62638f7ddf7247eb8   ← match
+        RW (HMAC): 783b75350a38d349190ac2bcb66450df
 
 Summary:
   Link  : OK — chip is responding
-  BIST  : FAIL
-  Auth  : CW mismatch / not authenticated
+  BIST  : PASS
+  Auth  : CW echoed correctly
 ```
 
-**"Link: OK"** is the important result — the SPI communication path (RK3588 → USB → STM32 → SPI → SGT1001) is fully working. BIST and Auth will work once the chip is provisioned with its secret key via CyberRock-Cloud.
+The CW echo match confirms the SPI communication path (RK3588 → USB → STM32 → SPI → SGT1001) is fully working end-to-end. The RW is the chip's HMAC-SHA256 response, which a CyberRock-Cloud server can verify against the provisioned secret key.
+
+### Unprovisioned chip output
+
+On a chip that has not yet had its HMAC key loaded via CyberRock-Cloud:
+
+```
+Mode 255  BIST result : NOT_PROVISIONED (HMAC key not yet loaded)
+          BRW         : 00000000000000000000000000000000
+          BEK         : 00000000000000000000000000000000
+```
+
+The TID is still readable — identity does not require provisioning. BIST and Auth will pass once the chip is provisioned.
 
 ---
 
