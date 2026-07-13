@@ -65,47 +65,52 @@ class SpidevInterface:
 
 
 class SerialBridgeInterface:
-    """STM32 USB-serial bridge via /dev/ttyACM0 using AT+SPI= protocol.
+    """STM32 USB-serial bridge via /dev/ttyACM0.
 
-    Protocol (discovered by probing):
-      → AT+SPI=<hex-encoded MOSI frame>\\r\\n
-      ← <00 status byte as 2 hex chars><hex-encoded MISO frame>\\r
+    Protocol:
+      → <hex-encoded MOSI frame>\\r\\n
+      ← <hex-encoded MISO frame>\\r
     """
 
     def __init__(self, port="/dev/ttyACM0", baud=115200):
         import serial
+        if not os.access(port, os.R_OK | os.W_OK):
+            import grp, subprocess
+            dialout_gid = grp.getgrnam("dialout").gr_gid
+            if dialout_gid not in os.getgroups():
+                sys.exit(
+                    f"Permission denied: {port}\n"
+                    f"Fix (permanent): sudo usermod -aG dialout $USER  # then log out and back in\n"
+                    f"Fix (this session): sudo chmod a+rw {port}"
+                )
         self._s = serial.Serial(port, baud, timeout=5)
         time.sleep(0.05)
         self._s.reset_input_buffer()
 
     def transact(self, tx: bytes) -> bytes:
         self._s.reset_input_buffer()
-        cmd = "AT+SPI=" + tx.hex() + "\r\n"
-        self._s.write(cmd.encode())
+        self._s.write(tx.hex().encode("ascii") + b"\r\n")
         self._s.flush()
 
-        # Response: <status_hex><miso_hex>\r
-        resp = self._s.read_until(b"\r", size=(len(tx) + 1) * 2 + 4)
+        resp = self._s.read_until(b"\r", size=len(tx) * 2 + 8)
         resp = resp.rstrip(b"\r\n")
 
-        if len(resp) < 2:
+        if not resp:
             raise IOError(
-                f"Serial bridge: empty response. "
+                "Serial bridge: empty response. "
                 "Check /dev/ttyACM0 permissions and STM32 connection."
             )
 
-        # First 2 chars = status byte hex (00 = OK)
-        status = int(resp[:2], 16)
-        if status != 0:
-            raise IOError(f"STM32 bridge error status: 0x{status:02x}")
+        try:
+            rx = bytes.fromhex(resp.decode("ascii"))
+        except (ValueError, UnicodeDecodeError) as e:
+            raise IOError(f"Serial bridge: bad response {resp!r}: {e}")
 
-        miso_hex = resp[2:].decode("ascii", errors="replace")
-        if len(miso_hex) != len(tx) * 2:
+        if len(rx) != len(tx):
             raise IOError(
-                f"Serial bridge: expected {len(tx) * 2} MISO hex chars, "
-                f"got {len(miso_hex)}: {miso_hex!r}"
+                f"Serial bridge: expected {len(tx)} MISO bytes, got {len(rx)}"
             )
-        return bytes.fromhex(miso_hex)
+        return rx
 
     def close(self):
         self._s.close()
